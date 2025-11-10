@@ -12,6 +12,9 @@
 (define-constant ERR-INSUFFICIENT-FUNDS (err u108))
 (define-constant ERR-INVOICE-EXPIRED (err u109))
 (define-constant ERR-INVALID-FACTORING-RATE (err u110))
+(define-constant ERR-INVALID-RATING (err u111))
+(define-constant ERR-ALREADY-RATED (err u112))
+(define-constant ERR-NOT-PARTICIPANT (err u113))
 
 (define-data-var invoice-id-nonce uint u0)
 (define-data-var platform-fee-rate uint u200)
@@ -57,6 +60,29 @@
   uint
 )
 
+(define-map invoice-ratings
+  {invoice-id: uint, rater: principal}
+  {rating: uint, review-block: uint}
+)
+
+(define-map business-reputation
+  principal
+  {
+    total-ratings: uint,
+    rating-sum: uint,
+    completed-invoices: uint
+  }
+)
+
+(define-map factor-reputation
+  principal
+  {
+    total-ratings: uint,
+    rating-sum: uint,
+    completed-investments: uint
+  }
+)
+
 (define-read-only (get-invoice (invoice-id uint))
   (map-get? invoices invoice-id)
 )
@@ -77,6 +103,52 @@
 
 (define-read-only (get-pending-withdrawal (user principal))
   (default-to u0 (map-get? pending-withdrawals user))
+)
+
+(define-read-only (get-invoice-rating (invoice-id uint) (rater principal))
+  (map-get? invoice-ratings {invoice-id: invoice-id, rater: rater})
+)
+
+(define-read-only (get-business-reputation (business principal))
+  (default-to 
+    {total-ratings: u0, rating-sum: u0, completed-invoices: u0}
+    (map-get? business-reputation business)
+  )
+)
+
+(define-read-only (get-factor-reputation (factor principal))
+  (default-to 
+    {total-ratings: u0, rating-sum: u0, completed-investments: u0}
+    (map-get? factor-reputation factor)
+  )
+)
+
+(define-read-only (get-average-business-rating (business principal))
+  (let
+    (
+      (reputation (get-business-reputation business))
+      (total (get total-ratings reputation))
+      (sum (get rating-sum reputation))
+    )
+    (if (> total u0)
+      (ok (/ (* sum u100) total))
+      (ok u0)
+    )
+  )
+)
+
+(define-read-only (get-average-factor-rating (factor principal))
+  (let
+    (
+      (reputation (get-factor-reputation factor))
+      (total (get total-ratings reputation))
+      (sum (get rating-sum reputation))
+    )
+    (if (> total u0)
+      (ok (/ (* sum u100) total))
+      (ok u0)
+    )
+  )
 )
 
 (define-read-only (get-platform-fee-rate)
@@ -273,6 +345,49 @@
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
     (asserts! (<= new-rate u10000) ERR-INVALID-AMOUNT)
     (var-set max-factoring-rate new-rate)
+    (ok true)
+  )
+)
+
+(define-public (rate-invoice (invoice-id uint) (rating uint))
+  (let
+    (
+      (invoice (unwrap! (get-invoice invoice-id) ERR-INVOICE-NOT-FOUND))
+      (business-principal (get business invoice))
+      (factor-principal (unwrap! (get factor invoice) ERR-INVOICE-NOT-FACTORED))
+      (is-business (is-eq tx-sender business-principal))
+      (is-factor (is-eq tx-sender factor-principal))
+      (target-principal (if is-business factor-principal business-principal))
+      (business-rep (get-business-reputation business-principal))
+      (factor-rep (get-factor-reputation factor-principal))
+    )
+    (asserts! (or is-business is-factor) ERR-NOT-PARTICIPANT)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    (asserts! (is-eq (get status invoice) "completed") ERR-INVOICE-NOT-PAID)
+    (asserts! (is-none (get-invoice-rating invoice-id tx-sender)) ERR-ALREADY-RATED)
+    
+    (map-set invoice-ratings 
+      {invoice-id: invoice-id, rater: tx-sender}
+      {rating: rating, review-block: stacks-block-height}
+    )
+    
+    (if is-business
+      (map-set factor-reputation factor-principal
+        (merge factor-rep {
+          total-ratings: (+ (get total-ratings factor-rep) u1),
+          rating-sum: (+ (get rating-sum factor-rep) rating),
+          completed-investments: (+ (get completed-investments factor-rep) u1)
+        })
+      )
+      (map-set business-reputation business-principal
+        (merge business-rep {
+          total-ratings: (+ (get total-ratings business-rep) u1),
+          rating-sum: (+ (get rating-sum business-rep) rating),
+          completed-invoices: (+ (get completed-invoices business-rep) u1)
+        })
+      )
+    )
+    
     (ok true)
   )
 )
